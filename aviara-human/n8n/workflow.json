@@ -1,0 +1,267 @@
+{
+  "name": "Lead Automation Pipeline",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "lead-intake",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook_node",
+      "name": "Receive Lead (Webhook)",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [200, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "const body = $input.first().json.body ?? $input.first().json;\nconst errors = [];\n\nif (!body.name || body.name.trim().length === 0) errors.push('name is required');\nif (!body.email || !/^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/.test(body.email)) errors.push('valid email is required');\nif (!body.company || body.company.trim().length === 0) errors.push('company is required');\n\nif (errors.length > 0) throw new Error('Validation failed: ' + errors.join(', '));\n\nreturn [{\n  json: {\n    name: body.name.trim(),\n    email: body.email.toLowerCase().trim(),\n    company: body.company.trim(),\n    received_at: new Date().toISOString()\n  }\n}];"
+      },
+      "id": "validate_node",
+      "name": "Validate Input",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [420, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.FASTAPI_BASE_URL }}/enrich",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "x-api-key", "value": "={{ $env.FASTAPI_API_KEY }}" },
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            { "name": "name", "value": "={{ $json.name }}" },
+            { "name": "email", "value": "={{ $json.email }}" },
+            { "name": "company", "value": "={{ $json.company }}" }
+          ]
+        },
+        "options": { "timeout": 10000 }
+      },
+      "id": "enrich_node",
+      "name": "Enrich Lead",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [640, 200],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.FASTAPI_BASE_URL }}/classify",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "x-api-key", "value": "={{ $env.FASTAPI_API_KEY }}" },
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "message",
+              "value": "={{ 'New lead from ' + $('Validate Input').item.json.name + ' at ' + $('Validate Input').item.json.company }}"
+            }
+          ]
+        },
+        "options": { "timeout": 15000 }
+      },
+      "id": "classify_node",
+      "name": "Classify Intent",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [640, 400],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "jsCode": "const lead = $('Validate Input').item.json;\nconst enriched = $('Enrich Lead').item.json;\nconst classified = $('Classify Intent').item.json;\n\nreturn [{\n  json: {\n    ...lead,\n    linkedin_url: enriched.linkedin_url,\n    company_size: enriched.company_size,\n    industry: enriched.industry,\n    intent: classified.intent,\n    confidence: classified.confidence,\n    reasoning: classified.reasoning,\n    processed_at: new Date().toISOString()\n  }\n}];"
+      },
+      "id": "merge_node",
+      "name": "Merge Results",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [860, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "conditions": [
+            {
+              "leftValue": "={{ $json.intent }}",
+              "rightValue": "spam",
+              "operator": { "type": "string", "operation": "notEquals" }
+            },
+            {
+              "leftValue": "={{ $json.confidence }}",
+              "rightValue": 0.7,
+              "operator": { "type": "number", "operation": "gte" }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "filter_node",
+      "name": "Filter Qualified Leads",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1060, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.airtable.com/v0/{{ $env.AIRTABLE_BASE_ID }}/Leads",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "=Bearer {{ $env.AIRTABLE_API_KEY }}" },
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\"fields\": {\"Name\": \"{{ $json.name }}\", \"Email\": \"{{ $json.email }}\", \"Company\": \"{{ $json.company }}\", \"Industry\": \"{{ $json.industry }}\", \"Company Size\": \"{{ $json.company_size }}\", \"Intent\": \"{{ $json.intent }}\", \"Confidence\": {{ $json.confidence }} }}",
+        "options": { "timeout": 10000 }
+      },
+      "id": "airtable_node",
+      "name": "Save to Airtable",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1260, 200],
+      "retryOnFail": true,
+      "maxTries": 5,
+      "waitBetweenTries": 3000
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SLACK_WEBHOOK_URL }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\"text\": \"New Lead: {{ $json.name }} from {{ $json.company }}\\nIntent: {{ $json.intent }} ({{ ($json.confidence * 100).toFixed(0) }}%)\\nIndustry: {{ $json.industry }}\\nLinkedIn: {{ $json.linkedin_url }}\"}",
+        "options": { "timeout": 8000 }
+      },
+      "id": "slack_node",
+      "name": "Notify Slack",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1260, 400],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={\"status\": \"success\", \"intent\": \"{{ $('Merge Results').item.json.intent }}\", \"confidence\": {{ $('Merge Results').item.json.confidence }}}"
+      },
+      "id": "respond_ok",
+      "name": "Respond 200",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1480, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "const err = $input.first().json;\nconsole.error('[PIPELINE ERROR]', JSON.stringify({ error: err.message, time: new Date().toISOString() }));\nreturn [{ json: { error: err.message, time: new Date().toISOString() } }];"
+      },
+      "id": "error_handler",
+      "name": "Handle Error",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [640, 560]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SLACK_WEBHOOK_URL }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\"text\": \":red_circle: Pipeline error: {{ $json.error }}\"}",
+        "options": { "timeout": 5000 }
+      },
+      "id": "error_alert",
+      "name": "Alert on Error",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [860, 560]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseCode": 500,
+        "responseBody": "{\"status\": \"error\", \"message\": \"Pipeline failed\"}"
+      },
+      "id": "respond_error",
+      "name": "Respond 500",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1060, 560]
+    }
+  ],
+  "connections": {
+    "Receive Lead (Webhook)": {
+      "main": [[{ "node": "Validate Input", "type": "main", "index": 0 }]]
+    },
+    "Validate Input": {
+      "main": [
+        [
+          { "node": "Enrich Lead", "type": "main", "index": 0 },
+          { "node": "Classify Intent", "type": "main", "index": 0 }
+        ]
+      ],
+      "error": [[{ "node": "Handle Error", "type": "main", "index": 0 }]]
+    },
+    "Enrich Lead": {
+      "main": [[{ "node": "Merge Results", "type": "main", "index": 0 }]],
+      "error": [[{ "node": "Handle Error", "type": "main", "index": 0 }]]
+    },
+    "Classify Intent": {
+      "main": [[{ "node": "Merge Results", "type": "main", "index": 0 }]],
+      "error": [[{ "node": "Handle Error", "type": "main", "index": 0 }]]
+    },
+    "Merge Results": {
+      "main": [[{ "node": "Filter Qualified Leads", "type": "main", "index": 0 }]]
+    },
+    "Filter Qualified Leads": {
+      "main": [
+        [
+          { "node": "Save to Airtable", "type": "main", "index": 0 },
+          { "node": "Notify Slack", "type": "main", "index": 0 }
+        ],
+        [{ "node": "Respond 200", "type": "main", "index": 0 }]
+      ]
+    },
+    "Save to Airtable": {
+      "main": [[{ "node": "Respond 200", "type": "main", "index": 0 }]],
+      "error": [[{ "node": "Handle Error", "type": "main", "index": 0 }]]
+    },
+    "Notify Slack": {
+      "main": [[{ "node": "Respond 200", "type": "main", "index": 0 }]],
+      "error": [[{ "node": "Handle Error", "type": "main", "index": 0 }]]
+    },
+    "Handle Error": {
+      "main": [[{ "node": "Alert on Error", "type": "main", "index": 0 }]]
+    },
+    "Alert on Error": {
+      "main": [[{ "node": "Respond 500", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true
+  },
+  "tags": ["leads", "automation"]
+}

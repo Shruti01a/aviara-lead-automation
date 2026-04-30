@@ -1,0 +1,8 @@
+__pycache__/
+*.pvc
+.env
+*.log
+.cache/
+node_modules/
+.vscode/
+.idea/
